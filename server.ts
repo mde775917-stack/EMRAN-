@@ -5,6 +5,7 @@ import path from 'path';
 import zlib from 'zlib';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -778,6 +779,7 @@ async function startServer() {
   app.post('/api/translate', async (req: Request, res: Response) => {
     const { blocks = [], targetLang = 'es', title = '' } = req.body;
     const langNames: Record<string, string> = {
+      bn: 'Bengali (বাংলা)',
       es: 'Spanish',
       fr: 'French',
       de: 'German',
@@ -788,52 +790,118 @@ async function startServer() {
       zh: 'Chinese',
     };
 
-    try {
-      // Translate up to 25 blocks using public MyMemory / Google translate endpoint or structured fallback
-      const sourceText = [title, ...blocks.slice(0, 15).map((b: { text: string }) => b.text)]
-        .join('\n\n')
-        .slice(0, 1800);
+    const safeBlocks = Array.isArray(blocks)
+      ? (blocks as Array<{ tag?: string; text: string }>).slice(0, 25)
+      : [];
 
+    async function translateSingleText(text: string, tl: string): Promise<string | null> {
+      if (!text || !text.trim()) return '';
       const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(
-        targetLang
-      )}&dt=t&q=${encodeURIComponent(sourceText)}`;
-
+        tl
+      )}&dt=t&q=${encodeURIComponent(text)}`;
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
-      const response = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
-
-      if (response.ok) {
+      const timeout = setTimeout(() => controller.abort(), 4500);
+      try {
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (!response.ok) return null;
         const json = (await response.json()) as unknown[];
         if (Array.isArray(json) && Array.isArray(json[0])) {
-          const translatedFull = (json[0] as unknown[][])
+          return (json[0] as unknown[][])
             .map((part) => (Array.isArray(part) ? String(part[0] || '') : ''))
-            .join('');
-          const paragraphs = translatedFull
-            .split('\n\n')
-            .map((s) => s.trim())
-            .filter(Boolean);
-          res.json({
-            ok: true,
-            targetLanguage: langNames[targetLang] || targetLang,
-            translatedTitle: paragraphs[0] || title,
-            translatedBlocks: paragraphs.slice(1).map((text) => ({ tag: 'p', text })),
-          });
-          return;
+            .join('')
+            .trim();
         }
+      } catch {
+        clearTimeout(timeout);
       }
-    } catch {
-      // Fallback below
+      return null;
     }
 
-    res.json({
-      ok: true,
-      targetLanguage: langNames[targetLang] || targetLang,
-      translatedTitle: `[${(langNames[targetLang] || targetLang).toUpperCase()}] ${title}`,
-      translatedBlocks: (blocks as Array<{ tag?: string; text: string }>).map((b) => ({
-        tag: b.tag || 'p',
-        text: `[${targetLang.toUpperCase()}] ${b.text}`,
-      })),
+    try {
+      // 1. Primary: Real Google Translate GTX endpoint per block to preserve exact structure and tags
+      const [translatedTitle, ...translatedBlockTexts] = await Promise.all([
+        translateSingleText(String(title || ''), String(targetLang)),
+        ...safeBlocks.map((b) => translateSingleText(String(b.text || ''), String(targetLang))),
+      ]);
+
+      if (translatedTitle || translatedBlockTexts.some((t) => Boolean(t))) {
+        res.json({
+          ok: true,
+          targetLang,
+          targetLanguage: langNames[targetLang] || targetLang,
+          translatedTitle: translatedTitle || title,
+          translatedBlocks: safeBlocks.map((b, idx) => ({
+            tag: b.tag || 'p',
+            text: translatedBlockTexts[idx] || b.text,
+          })),
+        });
+        return;
+      }
+    } catch {
+      // Continue to Gemini server-side translation fallback
+    }
+
+    // 2. Secondary Server-Side Fallback: @google/genai (gemini-3.8-flash) if GEMINI_API_KEY is configured
+    if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY') {
+      try {
+        const ai = new GoogleGenAI({
+          apiKey: process.env.GEMINI_API_KEY,
+          httpOptions: {
+            headers: {
+              'User-Agent': 'aistudio-build',
+            },
+          },
+        });
+        const targetLabel = langNames[targetLang] || targetLang;
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: `Translate the following webpage title and content blocks into ${targetLabel} (language code: ${targetLang}). Return only natural, accurate ${targetLabel} text.\n\nTitle: ${title}\n\nBlocks:\n${JSON.stringify(
+            safeBlocks.map((b) => b.text)
+          )}`,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                translatedTitle: { type: Type.STRING },
+                translatedTexts: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
+                },
+              },
+              required: ['translatedTitle', 'translatedTexts'],
+            },
+          },
+        });
+
+        if (response.text) {
+          const parsed = JSON.parse(response.text.trim()) as {
+            translatedTitle?: string;
+            translatedTexts?: string[];
+          };
+          if (parsed.translatedTitle && Array.isArray(parsed.translatedTexts)) {
+            res.json({
+              ok: true,
+              targetLang,
+              targetLanguage: targetLabel,
+              translatedTitle: parsed.translatedTitle,
+              translatedBlocks: safeBlocks.map((b, idx) => ({
+                tag: b.tag || 'p',
+                text: parsed.translatedTexts?.[idx] || b.text,
+              })),
+            });
+            return;
+          }
+        }
+      } catch (err) {
+        console.error('Gemini translation fallback error:', err);
+      }
+    }
+
+    res.status(502).json({
+      ok: false,
+      error: 'Translation service temporarily unavailable.',
     });
   });
 

@@ -676,15 +676,11 @@ export default function App() {
     }
   };
 
-  // Reader Mode Extraction
-  const handleToggleReaderMode = () => {
-    if (readerData) {
-      setReaderData(null);
-      return;
-    }
+  // Reader Mode & Translation Extraction
+  const extractOrOpenReader = () => {
     if (activeTab.url.startsWith('uv://')) {
       setReaderData({
-        title: activeTab.title,
+        title: activeTab.title || 'Unlimited Virtual Multi-Profile Mobile Browser',
         url: activeTab.url,
         blocks: [
           {
@@ -705,11 +701,43 @@ export default function App() {
     }
     if (iframeRef.current && iframeRef.current.contentWindow) {
       iframeRef.current.contentWindow.postMessage({ type: 'UV_EXTRACT_READER' }, '*');
+      setTimeout(() => {
+        setReaderData((prev) =>
+          prev || {
+            title: activeTab.title || activeTab.url,
+            url: activeTab.url,
+            blocks: [
+              {
+                tag: 'h2',
+                text: activeTab.title || 'Webpage Reader View',
+              },
+              {
+                tag: 'p',
+                text: `Viewing ${activeTab.url} inside isolated profile "${activeProfile.name}". Select any target language above including Bengali (বাংলা) and tap Translate Now.`,
+              },
+            ],
+          }
+        );
+      }, 450);
+    }
+  };
+
+  const handleToggleReaderMode = () => {
+    if (readerData) {
+      setReaderData(null);
+      return;
+    }
+    extractOrOpenReader();
+  };
+
+  const handleOpenTranslateMode = () => {
+    if (!readerData) {
+      extractOrOpenReader();
     }
   };
 
   // Text-to-Speech (TTS)
-  const handleToggleTts = () => {
+  const handleToggleTts = (customText?: string, langCode?: string) => {
     if (!('speechSynthesis' in window)) {
       showToast('Speech synthesis not supported in this browser');
       return;
@@ -717,6 +745,25 @@ export default function App() {
     if (isSpeakingTts) {
       window.speechSynthesis.cancel();
       setIsSpeakingTts(false);
+      return;
+    }
+    const ttsLocaleMap: Record<string, string> = {
+      bn: 'bn-BD',
+      es: 'es-ES',
+      fr: 'fr-FR',
+      de: 'de-DE',
+      ja: 'ja-JP',
+      hi: 'hi-IN',
+      zh: 'zh-CN',
+    };
+    if (customText && typeof customText === 'string') {
+      const utter = new SpeechSynthesisUtterance(customText.slice(0, 4000));
+      if (langCode) {
+        utter.lang = ttsLocaleMap[langCode] || langCode;
+      }
+      utter.onend = () => setIsSpeakingTts(false);
+      setIsSpeakingTts(true);
+      window.speechSynthesis.speak(utter);
       return;
     }
     if (readerData) {
@@ -984,6 +1031,19 @@ export default function App() {
                   <span className="text-[10px] font-mono text-blue-500 shrink-0">· Desktop</span>
                 )}
               </div>
+            </button>
+
+            {/* Reader & Translation View Quick Toggle Button */}
+            <button
+              onClick={handleToggleReaderMode}
+              title="Reader & Translation View (Bengali বাংলা, Spanish, French...)"
+              className={`min-h-[34px] min-w-[34px] flex items-center justify-center rounded-xl transition-colors shrink-0 ${
+                readerData
+                  ? 'bg-blue-600 text-white'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200/60 dark:hover:bg-slate-700/60'
+              }`}
+            >
+              <BookOpen className="h-3.5 w-3.5" />
             </button>
 
             {/* Voice Search Button */}
@@ -1834,8 +1894,8 @@ export default function App() {
           }}
           onToggleReaderMode={handleToggleReaderMode}
           onOpenFindInPage={() => setShowFindBar(true)}
-          onOpenTranslate={handleToggleReaderMode}
-          onToggleTts={handleToggleTts}
+          onOpenTranslate={handleOpenTranslateMode}
+          onToggleTts={() => handleToggleTts()}
           onTogglePip={() => setShowPipPlayer((v) => !v)}
           onShareOrCopyUrl={() => {
             if (navigator.share) {

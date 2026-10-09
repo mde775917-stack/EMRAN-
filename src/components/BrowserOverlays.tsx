@@ -977,25 +977,40 @@ export const QrScannerModal: React.FC<{
 // ============================================================================
 // 6. Reader Mode & Page Translation Drawer
 // ============================================================================
+const TRANSLATION_LANGUAGE_LABELS: Record<string, string> = {
+  bn: 'Bengali (বাংলা)',
+  es: 'Spanish',
+  fr: 'French',
+  de: 'German',
+  ja: 'Japanese',
+  hi: 'Hindi',
+  zh: 'Chinese',
+};
+
 export const ReaderAndTranslateView: React.FC<{
   article: ReaderArticle;
   isSpeaking: boolean;
   onClose: () => void;
-  onToggleSpeak: () => void;
+  onToggleSpeak: (customText?: string, langCode?: string) => void;
 }> = ({ article, isSpeaking, onClose, onToggleSpeak }) => {
   const [paperTheme, setPaperTheme] = useState<'dark' | 'sepia' | 'light'>('dark');
-  const [fontScale, setFontScale] = useState(100);
-  const [targetLang, setTargetLang] = useState('es');
+  const [fontScale] = useState(100);
+  const [targetLang, setTargetLang] = useState('bn');
   const [translating, setTranslating] = useState(false);
+  const [translateError, setTranslateError] = useState<string | null>(null);
   const [translatedArticle, setTranslatedArticle] = useState<{
+    langCode: string;
     lang: string;
     title: string;
     blocks: Array<{ tag: string; text: string }>;
   } | null>(null);
 
+  const selectedLanguageLabel = TRANSLATION_LANGUAGE_LABELS[targetLang] || targetLang;
+
   const handleTranslate = async (lang: string) => {
     setTargetLang(lang);
     setTranslating(true);
+    setTranslateError(null);
     try {
       const resp = await fetch('/api/translate', {
         method: 'POST',
@@ -1006,16 +1021,19 @@ export const ReaderAndTranslateView: React.FC<{
           targetLang: lang,
         }),
       });
-      if (resp.ok) {
-        const data = await resp.json();
+      const data = await resp.json();
+      if (resp.ok && data.ok) {
         setTranslatedArticle({
-          lang: data.targetLanguage,
-          title: data.translatedTitle,
-          blocks: data.translatedBlocks || [],
+          langCode: lang,
+          lang: data.targetLanguage || TRANSLATION_LANGUAGE_LABELS[lang] || lang,
+          title: data.translatedTitle || article.title,
+          blocks: Array.isArray(data.translatedBlocks) ? data.translatedBlocks : article.blocks,
         });
+      } else {
+        setTranslateError(data.error || 'Unable to translate page content right now.');
       }
     } catch {
-      // ignore
+      setTranslateError('Network error while contacting translation service.');
     } finally {
       setTranslating(false);
     }
@@ -1027,23 +1045,38 @@ export const ReaderAndTranslateView: React.FC<{
     light: 'bg-white text-slate-900',
   }[paperTheme];
 
+  const optionClasses = {
+    dark: 'bg-slate-900 text-slate-100',
+    sepia: 'bg-amber-50 text-stone-900',
+    light: 'bg-white text-slate-900',
+  }[paperTheme];
+
   const activeBlocks = translatedArticle ? translatedArticle.blocks : article.blocks;
   const activeTitle = translatedArticle ? translatedArticle.title : article.title;
+
+  const handleReadAloudClick = () => {
+    const fullText = [activeTitle, ...activeBlocks.map((b) => b.text)].join('. ');
+    const speechLang = translatedArticle ? translatedArticle.langCode : 'en-US';
+    onToggleSpeak(fullText, speechLang);
+  };
 
   return (
     <div className={`min-h-full ${paperClasses} p-4 sm:p-8 pb-24 transition-colors`}>
       <div className="max-w-2xl mx-auto space-y-6">
         {/* Reader Controls Toolbar */}
         <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-slate-500/20">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <BookOpen className="h-4 w-4 text-blue-500" />
             <span className="text-xs font-bold">Reader &amp; Translation View</span>
+            <span className="text-xs font-medium text-blue-500">
+              · {translatedArticle ? `Translated: ${translatedArticle.lang}` : `Target: ${selectedLanguageLabel}`}
+            </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
             {/* TTS Button */}
             <button
-              onClick={onToggleSpeak}
+              onClick={handleReadAloudClick}
               className="min-h-[36px] px-3 py-1 rounded-xl bg-blue-600 text-white text-xs font-semibold flex items-center gap-1.5"
             >
               {isSpeaking ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
@@ -1053,22 +1086,41 @@ export const ReaderAndTranslateView: React.FC<{
             {/* Language Translate Picker */}
             <select
               value={targetLang}
-              onChange={(e) => handleTranslate(e.target.value)}
+              onChange={(e) => {
+                const nextLang = e.target.value;
+                setTargetLang(nextLang);
+                handleTranslate(nextLang);
+              }}
               aria-label="Translate language"
               className="min-h-[36px] rounded-xl border border-slate-500/30 bg-transparent px-2.5 text-xs font-medium"
             >
-              <option value="es">Translate: Spanish</option>
-              <option value="fr">Translate: French</option>
-              <option value="de">Translate: German</option>
-              <option value="ja">Translate: Japanese</option>
-              <option value="hi">Translate: Hindi</option>
-              <option value="zh">Translate: Chinese</option>
+              <option value="bn" className={optionClasses}>
+                Translate: Bengali (বাংলা)
+              </option>
+              <option value="es" className={optionClasses}>
+                Translate: Spanish
+              </option>
+              <option value="fr" className={optionClasses}>
+                Translate: French
+              </option>
+              <option value="de" className={optionClasses}>
+                Translate: German
+              </option>
+              <option value="ja" className={optionClasses}>
+                Translate: Japanese
+              </option>
+              <option value="hi" className={optionClasses}>
+                Translate: Hindi
+              </option>
+              <option value="zh" className={optionClasses}>
+                Translate: Chinese
+              </option>
             </select>
 
             <button
               onClick={() => handleTranslate(targetLang)}
               disabled={translating}
-              className="min-h-[36px] px-3 py-1 rounded-xl border border-slate-500/30 text-xs font-medium flex items-center gap-1"
+              className="min-h-[36px] px-3 py-1 rounded-xl border border-slate-500/30 hover:bg-blue-500/10 text-xs font-medium flex items-center gap-1 transition-colors"
             >
               <Languages className="h-3.5 w-3.5" />
               <span>{translating ? 'Translating...' : 'Translate Now'}</span>
@@ -1106,6 +1158,12 @@ export const ReaderAndTranslateView: React.FC<{
             </button>
           </div>
         </div>
+
+        {translateError && (
+          <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3.5 py-2 text-xs text-rose-400">
+            {translateError}
+          </div>
+        )}
 
         {/* Article Content */}
         <article
